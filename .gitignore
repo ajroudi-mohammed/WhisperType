@@ -1,0 +1,45 @@
+# Python virtual environment
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Model cache (large files, downloaded automatically)
+~/.cache/huggingface/
+*.bin
+*.ggml
+*.pt
+*.pth
+
+# Audio temp files
+*.wav
+*.mp3
+*.ogg
+
+# Settings (personal, per-machine)
+~/.config/whispertype.json
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Dist/build
+dist/
+build/
+*.egg-info/
