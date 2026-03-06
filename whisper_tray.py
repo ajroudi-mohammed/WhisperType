@@ -197,6 +197,9 @@ class WhisperTray:
         self.loader.done.connect(self.on_model_ready)
         self.loader.start()
 
+        # Init portal session in background
+        threading.Thread(target=self.init_portal_session, daemon=True).start()
+
         # Keyboard listener
         self.start_kb_listener()
 
@@ -286,6 +289,120 @@ class WhisperTray:
             audio_data = np.concatenate(chunks, axis=0)
             threading.Thread(target=self.transcribe, args=(audio_data,), daemon=True).start()
 
+    def init_portal_session(self):
+        """Call once at startup to establish the RemoteDesktop session."""
+        try:
+            import dbus
+            import dbus.mainloop.glib
+            dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+
+            self.dbus_bus = dbus.SessionBus()
+            self.portal_session_handle = None
+
+            portal_obj = self.dbus_bus.get_object(
+                'org.freedesktop.portal.Desktop',
+                '/org/freedesktop/portal/desktop'
+            )
+            self.remote_desktop = dbus.Interface(
+                portal_obj,
+                'org.freedesktop.portal.RemoteDesktop'
+            )
+
+            import os, random, string
+            token = ''.join(random.choices(string.ascii_lowercase, k=8))
+            session_token = ''.join(random.choices(string.ascii_lowercase, k=8))
+
+            # Step 1: CreateSession
+            request_handle = self.remote_desktop.CreateSession({
+                'handle_token': dbus.String(token),
+                'session_handle_token': dbus.String(session_token)
+            })
+
+            # Wait for response signal
+            session_handle = self._wait_for_response(request_handle)
+            if not session_handle:
+                raise Exception("CreateSession failed")
+
+            self.portal_session_handle = session_handle
+
+            # Step 2: SelectDevices (keyboard only = 1)
+            token2 = ''.join(random.choices(string.ascii_lowercase, k=8))
+            req2 = self.remote_desktop.SelectDevices(
+                dbus.ObjectPath(session_handle),
+                {'handle_token': dbus.String(token2),
+                'types': dbus.UInt32(1)}  # 1 = keyboard
+            )
+            self._wait_for_response(req2)
+
+            # Step 3: Start (shows permission dialog on first run)
+            token3 = ''.join(random.choices(string.ascii_lowercase, k=8))
+            req3 = self.remote_desktop.Start(
+                dbus.ObjectPath(session_handle),
+                '',
+                {'handle_token': dbus.String(token3)}
+            )
+            self._wait_for_response(req3)
+
+            print("✅ Portal session ready")
+
+        except Exception as e:
+            print(f"⚠️  Portal init failed: {e}")
+            self.portal_session_handle = None
+
+    def _wait_for_response(self, request_handle, timeout=30):
+        """Block until the portal Request response signal fires."""
+        import dbus
+        result = {}
+        loop = __import__('threading').Event()
+
+        def response_handler(response, results):
+            if response == 0:
+                result['session'] = str(results.get('session_handle', ''))
+            loop.set()
+
+        self.dbus_bus.add_signal_receiver(
+            response_handler,
+            signal_name='Response',
+            dbus_interface='org.freedesktop.portal.Request',
+            path=str(request_handle)
+        )
+
+        loop.wait(timeout=timeout)
+        return result.get('session')
+
+    def type_via_portal(self, text):
+        try:
+            import dbus
+
+            # Init session if not done yet
+            if not hasattr(self, 'portal_session_handle') or not self.portal_session_handle:
+                self.init_portal_session()
+
+            if not self.portal_session_handle:
+                # fallback to clipboard only
+                print("Portal unavailable — text copied to clipboard, press Ctrl+V")
+                return
+
+            # Type each character via keysym
+            for char in text:
+                keysym = ord(char)
+                self.remote_desktop.NotifyKeyboardKeysym(
+                    dbus.ObjectPath(self.portal_session_handle),
+                    {},
+                    dbus.Int32(keysym),
+                    dbus.UInt32(1)  # key down
+                )
+                self.remote_desktop.NotifyKeyboardKeysym(
+                    dbus.ObjectPath(self.portal_session_handle),
+                    {},
+                    dbus.Int32(keysym),
+                    dbus.UInt32(0)  # key up
+                )
+
+        except Exception as e:
+            print(f"Portal typing error: {e}")
+            print("Text copied to clipboard — press Ctrl+V")
+
     def transcribe(self, audio_data):
         try:
             audio_int16 = (audio_data * 32767).astype(np.int16)
@@ -298,7 +415,7 @@ class WhisperTray:
             if text:
                 print(f"📝 {text}")
                 subprocess.run(["wl-copy", text])
-                subprocess.run(["sudo", "ydotool", "type", "--delay", "50", "--", text])
+                self.type_via_portal(text)
         except Exception as e:
             print(f"Error: {e}")
         finally:
