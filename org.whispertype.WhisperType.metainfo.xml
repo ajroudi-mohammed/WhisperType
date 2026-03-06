@@ -3,6 +3,8 @@
   <id>org.whispertype.WhisperType</id>
   <name>WhisperType</name>
   <summary>Push-to-talk voice transcription for any text field</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
   <description>
     <p>
       Hold a hotkey, speak, release — your words appear instantly in
@@ -12,9 +14,6 @@
     </p>
   </description>
   <url type="homepage">https://github.com/ajroudi-mohammed/WhisperType</url>
-  <licenses>
-    <license>MIT</license>
-  </licenses>
   <releases>
     <release version="1.0.0" date="2026-03-06"/>
   </releases>
