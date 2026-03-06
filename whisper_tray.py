@@ -367,58 +367,73 @@ class WhisperTray:
             threading.Thread(target=self.transcribe, args=(audio_data,), daemon=True).start()
 
     def init_portal_session(self):
-        """Call once at startup to establish the RemoteDesktop session."""
+        """Call once at startup to establish the RemoteDesktop session via GDBus."""
         try:
-            import dbus
-            import dbus.mainloop.glib
-            dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+            from gi.repository import Gio, GLib
+            import random, string
 
-            self.dbus_bus = dbus.SessionBus()
             self.portal_session_handle = None
+            self._gio_bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 
-            portal_obj = self.dbus_bus.get_object(
-                'org.freedesktop.portal.Desktop',
-                '/org/freedesktop/portal/desktop'
-            )
-            self.remote_desktop = dbus.Interface(
-                portal_obj,
-                'org.freedesktop.portal.RemoteDesktop'
-            )
+            def call(iface, method, params):
+                """Synchronous D-Bus call helper."""
+                return self._gio_bus.call_sync(
+                    'org.freedesktop.portal.Desktop',
+                    '/org/freedesktop/portal/desktop',
+                    iface,
+                    method,
+                    params,
+                    None, Gio.DBusCallFlags.NONE, -1, None
+                )
 
-            import os, random, string
-            token = ''.join(random.choices(string.ascii_lowercase, k=8))
-            session_token = ''.join(random.choices(string.ascii_lowercase, k=8))
+            def wait_for_response(request_path, timeout=30):
+                """Block until the portal Request fires its Response signal."""
+                result = {}
+                evt = threading.Event()
+
+                def on_signal(conn, sender, path, iface, name, params):
+                    if name == 'Response' and path == request_path:
+                        code, results = params.unpack()
+                        if code == 0:
+                            result['session'] = results.get('session_handle', '')
+                        evt.set()
+
+                sub = self._gio_bus.signal_subscribe(
+                    None, 'org.freedesktop.portal.Request', 'Response',
+                    request_path, None,
+                    Gio.DBusSignalFlags.NONE, on_signal
+                )
+                evt.wait(timeout=timeout)
+                self._gio_bus.signal_unsubscribe(sub)
+                return result.get('session')
+
+            tok  = ''.join(random.choices(string.ascii_lowercase, k=8))
+            stok = ''.join(random.choices(string.ascii_lowercase, k=8))
 
             # Step 1: CreateSession
-            request_handle = self.remote_desktop.CreateSession({
-                'handle_token': dbus.String(token),
-                'session_handle_token': dbus.String(session_token)
-            })
-
-            # Wait for response signal
-            session_handle = self._wait_for_response(request_handle)
+            ret = call('org.freedesktop.portal.RemoteDesktop', 'CreateSession',
+                       GLib.Variant('(a{sv})', ({'handle_token': GLib.Variant('s', tok),
+                                                 'session_handle_token': GLib.Variant('s', stok)},)))
+            request_path = ret.unpack()[0]
+            session_handle = wait_for_response(request_path)
             if not session_handle:
                 raise Exception("CreateSession failed")
-
             self.portal_session_handle = session_handle
 
-            # Step 2: SelectDevices (keyboard only = 1)
-            token2 = ''.join(random.choices(string.ascii_lowercase, k=8))
-            req2 = self.remote_desktop.SelectDevices(
-                dbus.ObjectPath(session_handle),
-                {'handle_token': dbus.String(token2),
-                'types': dbus.UInt32(1)}  # 1 = keyboard
-            )
-            self._wait_for_response(req2)
+            # Step 2: SelectDevices (keyboard = 1)
+            tok2 = ''.join(random.choices(string.ascii_lowercase, k=8))
+            ret2 = call('org.freedesktop.portal.RemoteDesktop', 'SelectDevices',
+                        GLib.Variant('(oa{sv})', (session_handle,
+                                                  {'handle_token': GLib.Variant('s', tok2),
+                                                   'types': GLib.Variant('u', 1)})))
+            wait_for_response(ret2.unpack()[0])
 
-            # Step 3: Start (shows permission dialog on first run)
-            token3 = ''.join(random.choices(string.ascii_lowercase, k=8))
-            req3 = self.remote_desktop.Start(
-                dbus.ObjectPath(session_handle),
-                '',
-                {'handle_token': dbus.String(token3)}
-            )
-            self._wait_for_response(req3)
+            # Step 3: Start
+            tok3 = ''.join(random.choices(string.ascii_lowercase, k=8))
+            ret3 = call('org.freedesktop.portal.RemoteDesktop', 'Start',
+                        GLib.Variant('(osa{sv})', (session_handle, '',
+                                                   {'handle_token': GLib.Variant('s', tok3)})))
+            wait_for_response(ret3.unpack()[0])
 
             print("✅ Portal session ready")
 
@@ -426,55 +441,31 @@ class WhisperTray:
             print(f"⚠️  Portal init failed: {e}")
             self.portal_session_handle = None
 
-    def _wait_for_response(self, request_handle, timeout=30):
-        """Block until the portal Request response signal fires."""
-        import dbus
-        result = {}
-        loop = __import__('threading').Event()
-
-        def response_handler(response, results):
-            if response == 0:
-                result['session'] = str(results.get('session_handle', ''))
-            loop.set()
-
-        self.dbus_bus.add_signal_receiver(
-            response_handler,
-            signal_name='Response',
-            dbus_interface='org.freedesktop.portal.Request',
-            path=str(request_handle)
-        )
-
-        loop.wait(timeout=timeout)
-        return result.get('session')
-
     def type_via_portal(self, text):
         try:
-            import dbus
+            from gi.repository import Gio, GLib
 
-            # Init session if not done yet
             if not hasattr(self, 'portal_session_handle') or not self.portal_session_handle:
                 self.init_portal_session()
 
             if not self.portal_session_handle:
-                # fallback to clipboard only
                 print("Portal unavailable — text copied to clipboard, press Ctrl+V")
                 return
 
-            # Type each character via keysym
+            # Type each character via keysym using GDBus
             for char in text:
                 keysym = ord(char)
-                self.remote_desktop.NotifyKeyboardKeysym(
-                    dbus.ObjectPath(self.portal_session_handle),
-                    {},
-                    dbus.Int32(keysym),
-                    dbus.UInt32(1)  # key down
-                )
-                self.remote_desktop.NotifyKeyboardKeysym(
-                    dbus.ObjectPath(self.portal_session_handle),
-                    {},
-                    dbus.Int32(keysym),
-                    dbus.UInt32(0)  # key up
-                )
+                for state in (1, 0):  # key down, then key up
+                    self._gio_bus.call_sync(
+                        'org.freedesktop.portal.Desktop',
+                        '/org/freedesktop/portal/desktop',
+                        'org.freedesktop.portal.RemoteDesktop',
+                        'NotifyKeyboardKeysym',
+                        GLib.Variant('(oa{sv}iu)',
+                                     (self.portal_session_handle, {},
+                                      keysym, state)),
+                        None, Gio.DBusCallFlags.NONE, -1, None
+                    )
 
         except Exception as e:
             print(f"Portal typing error: {e}")
