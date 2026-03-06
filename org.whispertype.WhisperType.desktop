@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=WhisperType
+Comment=Voice to text anywhere — powered by Whisper AI
+Exec=whispertype.sh
+Icon=org.whispertype.WhisperType
+Terminal=false
+Type=Application
+Categories=Utility;Accessibility;

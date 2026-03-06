@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.whispertype.WhisperType</id>
+  <name>WhisperType</name>
+  <summary>Push-to-talk voice transcription for any text field</summary>
+  <description>
+    <p>
+      Hold a hotkey, speak, release — your words appear instantly in
+      whatever text field is focused. Works in any app: browsers, chat
+      apps, terminals, editors, anywhere. Powered by OpenAI Whisper,
+      running fully locally with no cloud and no subscription.
+    </p>
+  </description>
+  <url type="homepage">https://github.com/ajroudi-mohammed/WhisperType</url>
+  <licenses>
+    <license>MIT</license>
+  </licenses>
+  <releases>
+    <release version="1.0.0" date="2026-03-06"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>
