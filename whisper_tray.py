@@ -3,17 +3,94 @@ import os
 import tempfile
 import subprocess
 import threading
+import struct
+import glob
 import json
 import numpy as np
 import sounddevice as sd
 import scipy.io.wavfile as wav
-from pynput import keyboard
 from faster_whisper import WhisperModel
 from PyQt6.QtWidgets import (QApplication, QSystemTrayIcon, QMenu,
                               QDialog, QVBoxLayout, QHBoxLayout,
                               QLabel, QPushButton, QKeySequenceEdit)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont, QKeySequence
+
+# ── Keyboard backend: try pynput, fall back to raw /dev/input (Wayland-safe) ──
+try:
+    from pynput import keyboard
+except Exception:
+    # pynput 1.6.x only supports X11; use /dev/input directly instead.
+    # Works on Wayland because --device=all in the Flatpak manifest grants
+    # access to all /dev/input/event* nodes without any display server.
+    _KEYCODE_MAP = {
+        1: 'esc',    2: '1',    3: '2',    4: '3',    5: '4',    6: '5',
+        7: '6',      8: '7',    9: '8',   10: '9',   11: '0',   12: 'minus',
+        13: 'equal', 14: 'backspace', 15: 'tab', 28: 'enter', 57: 'space',
+        16: 'q',  17: 'w',  18: 'e',  19: 'r',  20: 't',  21: 'y',  22: 'u',
+        23: 'i',  24: 'o',  25: 'p',  30: 'a',  31: 's',  32: 'd',  33: 'f',
+        34: 'g',  35: 'h',  36: 'j',  37: 'k',  38: 'l',  44: 'z',  45: 'x',
+        46: 'c',  47: 'v',  48: 'b',  49: 'n',  50: 'm',
+        59: 'f1',  60: 'f2',  61: 'f3',  62: 'f4',  63: 'f5',  64: 'f6',
+        65: 'f7',  66: 'f8',  67: 'f9',  68: 'f10', 87: 'f11', 88: 'f12',
+        29: 'ctrl_l',  97: 'ctrl_r',  42: 'shift_l', 54: 'shift_r',
+        56: 'alt_l',  100: 'alt_r',  125: 'cmd_l',  126: 'cmd_r',
+        103: 'up', 108: 'down', 105: 'left', 106: 'right',
+        111: 'delete', 110: 'insert', 102: 'home', 107: 'end',
+        104: 'page_up', 109: 'page_down',
+    }
+
+    class _EvdevKey:
+        """Mimics pynput Key/KeyCode so existing on_press callbacks work unchanged."""
+        def __init__(self, name):
+            self.name = name
+            self.char = name if len(name) == 1 else None
+
+    class _EvdevListener:
+        """Drop-in for pynput.keyboard.Listener that reads raw /dev/input events."""
+        _EV_KEY = 1
+        _FMT    = 'llHHI'
+        _SZ     = struct.calcsize('llHHI')
+
+        def __init__(self, on_press=None, on_release=None, **_):
+            self._on_press   = on_press
+            self._on_release = on_release
+            self._running    = False
+
+        def start(self):
+            self._running = True
+            for dev in glob.glob('/dev/input/event*'):
+                threading.Thread(target=self._watch, args=(dev,),
+                                 daemon=True).start()
+
+        def stop(self):
+            self._running = False
+
+        def _watch(self, path):
+            try:
+                with open(path, 'rb') as f:
+                    while self._running:
+                        raw = f.read(self._SZ)
+                        if not raw or len(raw) < self._SZ:
+                            break
+                        _, _, type_, code, value = struct.unpack(self._FMT, raw)
+                        if type_ == self._EV_KEY and code in _KEYCODE_MAP:
+                            key = _EvdevKey(_KEYCODE_MAP[code])
+                            if value in (1, 2):    # press / auto-repeat
+                                ret = self._on_press and self._on_press(key)
+                                if ret is False:
+                                    return
+                            elif value == 0:       # release
+                                ret = self._on_release and self._on_release(key)
+                                if ret is False:
+                                    return
+            except (PermissionError, OSError):
+                pass
+
+    class _keyboard_module:
+        Listener = _EvdevListener
+
+    keyboard = _keyboard_module()
 
 SAMPLE_RATE = 44100
 SETTINGS_FILE = os.path.expanduser("~/.config/whispertype.json")
